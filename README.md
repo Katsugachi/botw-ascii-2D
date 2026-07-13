@@ -1,6 +1,7 @@
-# botw-ascii-2D
+# Legend Of Zelda: Breath Of The Wild ASCII
 2D Top Down ASCII of BOTW. significantly easier to do than 2.5D. <br>
-HOWEVER, heightfield is toggleable in settings, so 2.25D?
+HOWEVER, heightfield is toggleable in settings, so 2.25D? <br>
+I can't do much more than this, so expand on it and make it better if you want.
 ## Instructions
 1. Clone & Navigate <br>
 `git clone https://github.com/Katsugachi/botw-ascii-2D/tree/main` <br>
