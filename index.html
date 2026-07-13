@@ -560,7 +560,15 @@
   const RELIEF_HEIGHT_POWER = 1.15;
   const RELIEF_SHADOW_ALPHA = 0.24;
 
-  const OVERVIEW_RES = 3072;      // resolution (both axes) of the LOD bitmap
+  // Important: the source overview contains bright, thin roads.  Those should
+  // stay painted on the map, but they should NOT become raised walls.  Build
+  // relief from a blurred low-frequency terrain field, while coloring from
+  // the original detail field.  This keeps mountains/hills raised and roads
+  // flat on the surface.
+  const RELIEF_TERRAIN_BLUR_RADIUS = 12;
+  const RELIEF_TERRAIN_BLUR_PASSES = 2;
+
+  const OVERVIEW_RES = 1536;     // resolution (both axes) of the LOD bitmap
   const MINIMAP_DISPLAY_SIZE = 168;
   const HEATMAP_BUCKETS = 20;    // quantization for run-batched heatmap text
   const LARGE_FILE_WARN_BYTES = 60 * 1024 * 1024; // 60 MB
@@ -904,12 +912,62 @@
       imgData.data[i * 4 + 3] = 255;
     }
     octx.putImageData(imgData, 0, 0);
-    buildReliefOverviewBitmap();
+
+    // Heightfield is off by default, so do not spend time rebuilding its
+    // heavier 2.5D bitmap unless the user has actually enabled it.
+    if (state.reliefEnabled) buildReliefOverviewBitmap();
+    else state.reliefCanvas = null;
   }
 
   function hexToRgbFromColorString(rgbString) {
     const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(rgbString);
     return { r: +m[1], g: +m[2], b: +m[3] };
+  }
+
+  function buildReliefTerrainHeightBuffer(source, width, height) {
+    let current = source;
+    const scratchA = new Float32Array(width * height);
+    const scratchB = new Float32Array(width * height);
+
+    for (let pass = 0; pass < RELIEF_TERRAIN_BLUR_PASSES; pass++) {
+      // Safe buffer reuse: horizontal reads `current` and writes scratchA;
+      // vertical then reads scratchA and writes scratchB. On the next pass,
+      // horizontal reads scratchB and overwrites scratchA again.
+      boxBlurHorizontal(current, scratchA, width, height, RELIEF_TERRAIN_BLUR_RADIUS);
+      boxBlurVertical(scratchA, scratchB, width, height, RELIEF_TERRAIN_BLUR_RADIUS);
+      current = scratchB;
+    }
+
+    return current;
+  }
+
+  function boxBlurHorizontal(src, dst, width, height, radius) {
+    const span = radius * 2 + 1;
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      let sum = 0;
+      for (let x = -radius; x <= radius; x++) sum += src[row + clamp(x, 0, width - 1)];
+      for (let x = 0; x < width; x++) {
+        dst[row + x] = sum / span;
+        const removeX = clamp(x - radius, 0, width - 1);
+        const addX = clamp(x + radius + 1, 0, width - 1);
+        sum += src[row + addX] - src[row + removeX];
+      }
+    }
+  }
+
+  function boxBlurVertical(src, dst, width, height, radius) {
+    const span = radius * 2 + 1;
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let y = -radius; y <= radius; y++) sum += src[clamp(y, 0, height - 1) * width + x];
+      for (let y = 0; y < height; y++) {
+        dst[y * width + x] = sum / span;
+        const removeY = clamp(y - radius, 0, height - 1);
+        const addY = clamp(y + radius + 1, 0, height - 1);
+        sum += src[addY * width + x] - src[removeY * width + x];
+      }
+    }
   }
 
   function buildReliefOverviewBitmap() {
@@ -929,6 +987,7 @@
     const out = imgData.data;
     const bg = hexToRgb(COLOR_MODES[state.colorMode].bg);
     const density = state.densityBuffer;
+    const terrainHeight = buildReliefTerrainHeightBuffer(density, OVERVIEW_RES, OVERVIEW_RES);
 
     // Pre-cache 256 possible colors so we do not parse rgb() strings for
     // every single pixel while building the heightfield.
@@ -944,16 +1003,16 @@
       out[i + 3] = 255;
     }
 
-    function sample(x, y) {
+    function sampleHeight(x, y) {
       x = Math.min(OVERVIEW_RES - 1, Math.max(0, x | 0));
       y = Math.min(OVERVIEW_RES - 1, Math.max(0, y | 0));
-      return density[y * OVERVIEW_RES + x];
+      return terrainHeight[y * OVERVIEW_RES + x];
     }
 
     // Soft cast shadows first.  Terrain drawn later lands on top of these.
     for (let y = 0; y < OVERVIEW_RES; y++) {
       for (let x = 0; x < OVERVIEW_RES; x++) {
-        const h = Math.pow(density[y * OVERVIEW_RES + x], RELIEF_HEIGHT_POWER);
+        const h = Math.pow(terrainHeight[y * OVERVIEW_RES + x], RELIEF_HEIGHT_POWER);
         if (h <= 0.01) continue;
         const shadowX = x + Math.round(h * (RELIEF_SIDE_SHIFT_PX + 7));
         const shadowY = y + Math.round(h * (RELIEF_HEIGHT_PX * 0.42 + 5));
@@ -967,8 +1026,9 @@
     for (let y = 0; y < OVERVIEW_RES; y++) {
       for (let x = 0; x < OVERVIEW_RES; x++) {
         const idx = y * OVERVIEW_RES + x;
-        const d = density[idx];
-        const h = Math.pow(d, RELIEF_HEIGHT_POWER);
+        const d = density[idx];                  // original map detail/color
+        const terrain = terrainHeight[idx];      // smoothed elevation only
+        const h = Math.pow(terrain, RELIEF_HEIGHT_POWER);
         const lift = Math.round(h * RELIEF_HEIGHT_PX);
         const side = Math.round(h * RELIEF_SIDE_SHIFT_PX);
         const px = x + side;
@@ -976,13 +1036,14 @@
 
         const base = colorCache[Math.max(0, Math.min(255, Math.round(d * 255)))];
 
-        // Slope lighting from upper-left.  It is intentionally exaggerated:
-        // this is an atlas visualization, not a physically accurate DEM.
-        const gradX = sample(x + 1, y) - sample(x - 1, y);
-        const gradY = sample(x, y + 1) - sample(x, y - 1);
+        // Slope lighting from upper-left, computed from the smoothed terrain
+        // height instead of raw brightness.  This prevents roads/rivers/textured
+        // outlines from casting cliff-like shadows.
+        const gradX = sampleHeight(x + 1, y) - sampleHeight(x - 1, y);
+        const gradY = sampleHeight(x, y + 1) - sampleHeight(x, y - 1);
         const shade = clamp(0.88 + (-gradX * 0.55 - gradY * 0.85) * RELIEF_SLOPE_STRENGTH + h * 0.18, 0.42, 1.45);
         const top = scaleRgb(base, shade);
-        const wall = scaleRgb(base, 0.33 + h * 0.28);
+        const wall = scaleRgb(colorCache[Math.max(0, Math.min(255, Math.round(terrain * 255)))], 0.33 + h * 0.28);
 
         if (lift > 0) {
           const wallBottom = Math.min(OVERVIEW_RES - 1, y + Math.round(side * 0.35));
@@ -1383,6 +1444,7 @@
 
   reliefToggle.addEventListener("change", () => {
     state.reliefEnabled = reliefToggle.checked;
+    if (state.reliefEnabled && !state.reliefCanvas) buildReliefOverviewBitmap();
     markDirty();
   });
 
