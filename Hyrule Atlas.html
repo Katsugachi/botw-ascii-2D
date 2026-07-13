@@ -169,6 +169,48 @@
     accent-color: var(--cyan);
     background: transparent;
   }
+  .toggleRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--ink-muted);
+    cursor: pointer;
+    user-select: none;
+  }
+  .toggleRow input[type="checkbox"] {
+    width: 34px;
+    height: 18px;
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
+    flex: 0 0 auto;
+    border: 1px solid var(--cyan-dim);
+    border-radius: 999px;
+    background: rgba(0,0,0,0.25);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .toggleRow input[type="checkbox"]::before {
+    content: "";
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    left: 2px;
+    top: 2px;
+    border-radius: 50%;
+    background: var(--ink-muted);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .toggleRow input[type="checkbox"]:checked {
+    border-color: var(--cyan);
+    background: rgba(95,242,224,0.16);
+  }
+  .toggleRow input[type="checkbox"]:checked::before {
+    transform: translateX(16px);
+    background: var(--cyan);
+  }
 
   /* ---------------- Main viewport ---------------- */
   #viewportWrap {
@@ -422,6 +464,12 @@
       <label>Vertical stretch <span class="val" id="aspectVal">100%</span></label>
       <input type="range" id="aspectSlider" min="50" max="200" value="100" step="1">
     </div>
+    <div class="field">
+      <label class="toggleRow" for="reliefToggle">
+        <span>2.5D heightfield</span>
+        <input type="checkbox" id="reliefToggle">
+      </label>
+    </div>
   </div>
 
   <div id="viewportWrap">
@@ -496,6 +544,15 @@
   const TEXT_FADE_START_PX = 1.0;
   const TEXT_FADE_END_PX = 3.2;
 
+  // Pseudo-3D relief built from the overview's light/dark density map.
+  // Dense/bright regions are treated as high ground, sparse/dark regions as
+  // low ground.  The result is a 2.5D heightfield backdrop under the ASCII.
+  const RELIEF_HEIGHT_PX = 26;
+  const RELIEF_SIDE_SHIFT_PX = 8;
+  const RELIEF_SLOPE_STRENGTH = 5.5;
+  const RELIEF_HEIGHT_POWER = 1.15;
+  const RELIEF_SHADOW_ALPHA = 0.24;
+
   const OVERVIEW_RES = 768;      // resolution (both axes) of the LOD bitmap
   const MINIMAP_DISPLAY_SIZE = 168;
   const HEATMAP_BUCKETS = 20;    // quantization for run-batched heatmap text
@@ -536,6 +593,7 @@
   const zoomVal = document.getElementById("zoomVal");
   const aspectSlider = document.getElementById("aspectSlider");
   const aspectVal = document.getElementById("aspectVal");
+  const reliefToggle = document.getElementById("reliefToggle");
   const colorModeSelect = document.getElementById("colorMode");
   const infoPanel = document.getElementById("infoPanel");
   const minimapWrap = document.getElementById("minimapWrap");
@@ -565,11 +623,13 @@
     offsetY: 0,
 
     colorMode: "ivory",
+    reliefEnabled: false,
     calibratedFont: "10px monospace",
     calibratedForWidth: -1,
 
     densityBuffer: null,     // Float32Array(OVERVIEW_RES*OVERVIEW_RES), raw density
     overviewCanvas: null,    // offscreen canvas holding the current color-mode bitmap
+    reliefCanvas: null,      // offscreen canvas holding pseudo-3D heightfield relief
     densityLookup: null,     // Map<charCode, 0..1>
     bucketLookup: null,      // Map<charCode, 0..HEATMAP_BUCKETS-1>
 
@@ -807,6 +867,7 @@
       imgData.data[i * 4 + 3] = 255;
     }
     octx.putImageData(imgData, 0, 0);
+    buildReliefOverviewBitmap();
   }
 
   function hexToRgbFromColorString(rgbString) {
@@ -814,11 +875,129 @@
     return { r: +m[1], g: +m[2], b: +m[3] };
   }
 
+  function buildReliefOverviewBitmap() {
+    if (!state.densityBuffer || !state.overviewCanvas) {
+      state.reliefCanvas = null;
+      return;
+    }
+
+    if (!state.reliefCanvas) {
+      state.reliefCanvas = document.createElement("canvas");
+      state.reliefCanvas.width = OVERVIEW_RES;
+      state.reliefCanvas.height = OVERVIEW_RES;
+    }
+
+    const rctx = state.reliefCanvas.getContext("2d");
+    const imgData = rctx.createImageData(OVERVIEW_RES, OVERVIEW_RES);
+    const out = imgData.data;
+    const bg = hexToRgb(COLOR_MODES[state.colorMode].bg);
+    const density = state.densityBuffer;
+
+    // Pre-cache 256 possible colors so we do not parse rgb() strings for
+    // every single pixel while building the heightfield.
+    const colorCache = new Array(256);
+    for (let i = 0; i < 256; i++) {
+      colorCache[i] = hexToRgbFromColorString(colorForDensity(i / 255, state.colorMode));
+    }
+
+    for (let i = 0; i < out.length; i += 4) {
+      out[i + 0] = bg.r;
+      out[i + 1] = bg.g;
+      out[i + 2] = bg.b;
+      out[i + 3] = 255;
+    }
+
+    function sample(x, y) {
+      x = Math.min(OVERVIEW_RES - 1, Math.max(0, x | 0));
+      y = Math.min(OVERVIEW_RES - 1, Math.max(0, y | 0));
+      return density[y * OVERVIEW_RES + x];
+    }
+
+    // Soft cast shadows first.  Terrain drawn later lands on top of these.
+    for (let y = 0; y < OVERVIEW_RES; y++) {
+      for (let x = 0; x < OVERVIEW_RES; x++) {
+        const h = Math.pow(density[y * OVERVIEW_RES + x], RELIEF_HEIGHT_POWER);
+        if (h <= 0.01) continue;
+        const shadowX = x + Math.round(h * (RELIEF_SIDE_SHIFT_PX + 7));
+        const shadowY = y + Math.round(h * (RELIEF_HEIGHT_PX * 0.42 + 5));
+        blendPixel(out, shadowX, shadowY, { r: 0, g: 0, b: 0 }, h * RELIEF_SHADOW_ALPHA);
+        blendPixel(out, shadowX + 1, shadowY, { r: 0, g: 0, b: 0 }, h * RELIEF_SHADOW_ALPHA * 0.55);
+        blendPixel(out, shadowX, shadowY + 1, { r: 0, g: 0, b: 0 }, h * RELIEF_SHADOW_ALPHA * 0.45);
+      }
+    }
+
+    // Draw back-to-front: dark vertical walls first, then lit top pixels.
+    for (let y = 0; y < OVERVIEW_RES; y++) {
+      for (let x = 0; x < OVERVIEW_RES; x++) {
+        const idx = y * OVERVIEW_RES + x;
+        const d = density[idx];
+        const h = Math.pow(d, RELIEF_HEIGHT_POWER);
+        const lift = Math.round(h * RELIEF_HEIGHT_PX);
+        const side = Math.round(h * RELIEF_SIDE_SHIFT_PX);
+        const px = x + side;
+        const py = y - lift;
+
+        const base = colorCache[Math.max(0, Math.min(255, Math.round(d * 255)))];
+
+        // Slope lighting from upper-left.  It is intentionally exaggerated:
+        // this is an atlas visualization, not a physically accurate DEM.
+        const gradX = sample(x + 1, y) - sample(x - 1, y);
+        const gradY = sample(x, y + 1) - sample(x, y - 1);
+        const shade = clamp(0.88 + (-gradX * 0.55 - gradY * 0.85) * RELIEF_SLOPE_STRENGTH + h * 0.18, 0.42, 1.45);
+        const top = scaleRgb(base, shade);
+        const wall = scaleRgb(base, 0.33 + h * 0.28);
+
+        if (lift > 0) {
+          const wallBottom = Math.min(OVERVIEW_RES - 1, y + Math.round(side * 0.35));
+          for (let wy = py + 1; wy <= wallBottom; wy++) {
+            const fade = 1 - clamp((wy - py) / Math.max(1, wallBottom - py + 1), 0, 1) * 0.35;
+            plotPixel(out, px, wy, scaleRgb(wall, fade));
+          }
+        }
+
+        plotPixel(out, px, py, top);
+        if (h > 0.5) plotPixel(out, px + 1, py, scaleRgb(top, 0.92));
+      }
+    }
+
+    rctx.putImageData(imgData, 0, 0);
+  }
+
+  function scaleRgb(rgb, amount) {
+    return {
+      r: Math.max(0, Math.min(255, Math.round(rgb.r * amount))),
+      g: Math.max(0, Math.min(255, Math.round(rgb.g * amount))),
+      b: Math.max(0, Math.min(255, Math.round(rgb.b * amount)))
+    };
+  }
+
+  function plotPixel(data, x, y, rgb) {
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || y < 0 || x >= OVERVIEW_RES || y >= OVERVIEW_RES) return;
+    const i = (y * OVERVIEW_RES + x) * 4;
+    data[i + 0] = rgb.r;
+    data[i + 1] = rgb.g;
+    data[i + 2] = rgb.b;
+    data[i + 3] = 255;
+  }
+
+  function blendPixel(data, x, y, rgb, alpha) {
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || y < 0 || x >= OVERVIEW_RES || y >= OVERVIEW_RES) return;
+    alpha = clamp(alpha, 0, 1);
+    const i = (y * OVERVIEW_RES + x) * 4;
+    data[i + 0] = Math.round(data[i + 0] * (1 - alpha) + rgb.r * alpha);
+    data[i + 1] = Math.round(data[i + 1] * (1 - alpha) + rgb.g * alpha);
+    data[i + 2] = Math.round(data[i + 2] * (1 - alpha) + rgb.b * alpha);
+    data[i + 3] = 255;
+  }
+
   function drawMinimap() {
-    if (!state.overviewCanvas) return;
+    const minimapSource = (state.reliefEnabled && state.reliefCanvas) ? state.reliefCanvas : state.overviewCanvas;
+    if (!minimapSource) return;
     minimapCtx.clearRect(0, 0, MINIMAP_DISPLAY_SIZE, MINIMAP_DISPLAY_SIZE);
     minimapCtx.imageSmoothingEnabled = true;
-    minimapCtx.drawImage(state.overviewCanvas, 0, 0, MINIMAP_DISPLAY_SIZE, MINIMAP_DISPLAY_SIZE);
+    minimapCtx.drawImage(minimapSource, 0, 0, MINIMAP_DISPLAY_SIZE, MINIMAP_DISPLAY_SIZE);
 
     const cellHeight = state.cellWidth * state.aspectRatio;
     const viewCols = canvas.clientWidth / state.cellWidth;
@@ -895,20 +1074,19 @@
     if (!state.lines) { updateInfoPanel(); return; }
 
     const textAlpha = smoothstep(TEXT_FADE_START_PX, TEXT_FADE_END_PX, state.cellWidth);
-    if (textAlpha <= 0) {
-      renderLodBitmap(cssW, cssH);
-      state.lastLodMode = "bitmap";
-    } else if (textAlpha < 1) {
-      renderLodBitmap(cssW, cssH);
+
+    // Always draw the relief/overview backdrop first.  Then fade exact ASCII
+    // glyphs over it from 1.0x upward, so the map resolves smoothly instead
+    // of randomly popping from bitmap into text.
+    renderLodBitmap(cssW, cssH);
+    if (textAlpha > 0) {
       ctx.save();
       ctx.globalAlpha = textAlpha;
       renderText(cssW, cssH, mode);
       ctx.restore();
-      state.lastLodMode = "transition";
-    } else {
-      renderText(cssW, cssH, mode);
-      state.lastLodMode = "text";
     }
+
+    state.lastLodMode = textAlpha <= 0 ? "bitmap" : (textAlpha < 1 ? "transition" : "text");
 
     drawMinimap();
     updateInfoPanel();
@@ -918,7 +1096,8 @@
   // draw the whole visible region in a single blit from the precomputed
   // overview bitmap. Cost is O(1) regardless of how far zoomed out we are.
   function renderLodBitmap(cssW, cssH) {
-    if (!state.overviewCanvas) return;
+    const lodSource = (state.reliefEnabled && state.reliefCanvas) ? state.reliefCanvas : state.overviewCanvas;
+    if (!lodSource) return;
 
     const cellHeight = state.cellWidth * state.aspectRatio;
     const mapScreenX = -state.offsetX * state.cellWidth;
@@ -940,7 +1119,7 @@
     const srcH = (destH / mapScreenH) * OVERVIEW_RES;
 
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(state.overviewCanvas, srcX, srcY, srcW, srcH, destX, destY, destW, destH);
+    ctx.drawImage(lodSource, srcX, srcY, srcW, srcH, destX, destY, destW, destH);
     window.__renderStats.drawImageCalls++;
   }
 
@@ -1165,6 +1344,11 @@
     markDirty();
   });
 
+  reliefToggle.addEventListener("change", () => {
+    state.reliefEnabled = reliefToggle.checked;
+    markDirty();
+  });
+
   zoomSlider.addEventListener("input", () => {
     if (!state.lines) return;
     const rect = canvas.getBoundingClientRect();
@@ -1248,6 +1432,7 @@
   window.addEventListener("resize", () => { clampOffsets(); markDirty(); });
   if (window.ResizeObserver) new ResizeObserver(() => { clampOffsets(); markDirty(); }).observe(canvas.parentElement);
 
+  reliefToggle.checked = state.reliefEnabled;
   resizeCanvasToDisplaySize();
   markDirty();
 })();
