@@ -283,7 +283,7 @@
     color: var(--amber);
   }
 
-  /* ---------------- Minimap (hex radar) ---------------- */
+  /* ---------------- Minimap (square radar) ---------------- */
   #minimapWrap {
     position: absolute;
     bottom: 16px; right: 16px;
@@ -293,15 +293,17 @@
   #minimapWrap.hidden { display: none; }
   #minimap {
     width: 100%; height: 100%;
-    clip-path: polygon(25% 3%, 75% 3%, 97% 50%, 75% 97%, 25% 97%, 3% 50%);
+    clip-path: none;
     background: #000;
-    box-shadow: inset 0 0 0 2px var(--cyan-dim);
+    border: 1px solid var(--cyan-dim);
+    box-shadow: inset 0 0 0 1px rgba(95, 242, 224, 0.18), 0 0 18px rgba(0,0,0,0.45);
     cursor: crosshair;
   }
   #minimapWrap .ring {
-    position: absolute; inset: -6px;
-    clip-path: polygon(25% 3%, 75% 3%, 97% 50%, 75% 97%, 25% 97%, 3% 50%);
+    position: absolute; inset: -5px;
+    clip-path: none;
     border: 1px solid var(--panel-edge);
+    border-radius: 2px;
     pointer-events: none;
     z-index: -1;
   }
@@ -449,7 +451,7 @@
           <polygon points="12,2 21,7 21,17 12,22 3,17 3,7"></polygon>
         </svg>
         <h2>Drop your ASCII map here</h2>
-        <p>Drag <code>BOTW-ASCII.txt</code>) onto this window, or choose it manually.</p>
+        <p>Drag <code>BOTW-ASCII.txt</code> onto this window, or choose it manually.</p>
         <button class="btn primary" id="btnLoadCenter">Choose file&hellip;</button>
       </div>
     </div>
@@ -487,7 +489,12 @@
   // it caps per-frame rendering work to a single drawImage call no matter
   // how far zoomed out the view is, instead of shaping tens of thousands
   // of characters across hundreds of fillText calls every frame.
-  const TEXT_LOD_THRESHOLD_PX = 4;
+  // LOD blending band.  Instead of abruptly replacing the overview with
+  // glyphs at one magic zoom level, the viewer crossfades from the overview
+  // scan into real text across this range.  That makes zoom-in feel continuous
+  // and prevents the "random popping" look when glyphs first become readable.
+  const TEXT_FADE_START_PX = 1.0;
+  const TEXT_FADE_END_PX = 3.2;
 
   const OVERVIEW_RES = 768;      // resolution (both axes) of the LOD bitmap
   const MINIMAP_DISPLAY_SIZE = 168;
@@ -583,6 +590,11 @@
   // ===================================================================
 
   function clamp(value, lo, hi) { return Math.min(hi, Math.max(lo, value)); }
+
+  function smoothstep(edge0, edge1, value) {
+    const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
+    return t * t * (3 - 2 * t);
+  }
 
   function showBanner(message, isError) {
     banner.textContent = message;
@@ -804,23 +816,29 @@
 
   function drawMinimap() {
     if (!state.overviewCanvas) return;
+    minimapCtx.clearRect(0, 0, MINIMAP_DISPLAY_SIZE, MINIMAP_DISPLAY_SIZE);
+    minimapCtx.imageSmoothingEnabled = true;
     minimapCtx.drawImage(state.overviewCanvas, 0, 0, MINIMAP_DISPLAY_SIZE, MINIMAP_DISPLAY_SIZE);
 
     const cellHeight = state.cellWidth * state.aspectRatio;
     const viewCols = canvas.clientWidth / state.cellWidth;
     const viewRows = canvas.clientHeight / cellHeight;
 
-    const rx = (state.offsetX / state.cols) * MINIMAP_DISPLAY_SIZE;
-    const ry = (state.offsetY / state.rows) * MINIMAP_DISPLAY_SIZE;
-    const rw = (viewCols / state.cols) * MINIMAP_DISPLAY_SIZE;
-    const rh = (viewRows / state.rows) * MINIMAP_DISPLAY_SIZE;
+    // Clamp the viewport rectangle to the map itself.  When the full map is
+    // visible and centered, this correctly shows a full square instead of a
+    // tiny off-edge rectangle.
+    const x0 = clamp((state.offsetX / state.cols) * MINIMAP_DISPLAY_SIZE, 0, MINIMAP_DISPLAY_SIZE);
+    const y0 = clamp((state.offsetY / state.rows) * MINIMAP_DISPLAY_SIZE, 0, MINIMAP_DISPLAY_SIZE);
+    const x1 = clamp(((state.offsetX + viewCols) / state.cols) * MINIMAP_DISPLAY_SIZE, 0, MINIMAP_DISPLAY_SIZE);
+    const y1 = clamp(((state.offsetY + viewRows) / state.rows) * MINIMAP_DISPLAY_SIZE, 0, MINIMAP_DISPLAY_SIZE);
 
+    minimapCtx.save();
     minimapCtx.strokeStyle = "#eaf8f6";
     minimapCtx.lineWidth = 2;
-    minimapCtx.strokeRect(
-      clamp(rx, 0, MINIMAP_DISPLAY_SIZE), clamp(ry, 0, MINIMAP_DISPLAY_SIZE),
-      Math.max(1, rw), Math.max(1, rh)
-    );
+    minimapCtx.shadowColor = "rgba(95,242,224,0.65)";
+    minimapCtx.shadowBlur = 5;
+    minimapCtx.strokeRect(x0 + 1, y0 + 1, Math.max(1, x1 - x0 - 2), Math.max(1, y1 - y0 - 2));
+    minimapCtx.restore();
   }
 
   // ===================================================================
@@ -876,9 +894,17 @@
 
     if (!state.lines) { updateInfoPanel(); return; }
 
-    if (state.cellWidth < TEXT_LOD_THRESHOLD_PX) {
+    const textAlpha = smoothstep(TEXT_FADE_START_PX, TEXT_FADE_END_PX, state.cellWidth);
+    if (textAlpha <= 0) {
       renderLodBitmap(cssW, cssH);
       state.lastLodMode = "bitmap";
+    } else if (textAlpha < 1) {
+      renderLodBitmap(cssW, cssH);
+      ctx.save();
+      ctx.globalAlpha = textAlpha;
+      renderText(cssW, cssH, mode);
+      ctx.restore();
+      state.lastLodMode = "transition";
     } else {
       renderText(cssW, cssH, mode);
       state.lastLodMode = "text";
@@ -892,15 +918,29 @@
   // draw the whole visible region in a single blit from the precomputed
   // overview bitmap. Cost is O(1) regardless of how far zoomed out we are.
   function renderLodBitmap(cssW, cssH) {
-    const viewColsFrac = (cssW / state.cellWidth) / state.cols;
-    const viewRowsFrac = (cssH / (state.cellWidth * state.aspectRatio)) / state.rows;
-    const srcX = (state.offsetX / state.cols) * OVERVIEW_RES;
-    const srcY = (state.offsetY / state.rows) * OVERVIEW_RES;
-    const srcW = viewColsFrac * OVERVIEW_RES;
-    const srcH = viewRowsFrac * OVERVIEW_RES;
+    if (!state.overviewCanvas) return;
+
+    const cellHeight = state.cellWidth * state.aspectRatio;
+    const mapScreenX = -state.offsetX * state.cellWidth;
+    const mapScreenY = -state.offsetY * cellHeight;
+    const mapScreenW = state.cols * state.cellWidth;
+    const mapScreenH = state.rows * cellHeight;
+
+    const destX = Math.max(0, mapScreenX);
+    const destY = Math.max(0, mapScreenY);
+    const destRight = Math.min(cssW, mapScreenX + mapScreenW);
+    const destBottom = Math.min(cssH, mapScreenY + mapScreenH);
+    const destW = destRight - destX;
+    const destH = destBottom - destY;
+    if (destW <= 0 || destH <= 0 || mapScreenW <= 0 || mapScreenH <= 0) return;
+
+    const srcX = ((destX - mapScreenX) / mapScreenW) * OVERVIEW_RES;
+    const srcY = ((destY - mapScreenY) / mapScreenH) * OVERVIEW_RES;
+    const srcW = (destW / mapScreenW) * OVERVIEW_RES;
+    const srcH = (destH / mapScreenH) * OVERVIEW_RES;
 
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(state.overviewCanvas, srcX, srcY, srcW, srcH, 0, 0, cssW, cssH);
+    ctx.drawImage(state.overviewCanvas, srcX, srcY, srcW, srcH, destX, destY, destW, destH);
     window.__renderStats.drawImageCalls++;
   }
 
@@ -960,10 +1000,11 @@
 
   function updateInfoPanel() {
     if (!state.lines) { infoPanel.innerHTML = ""; return; }
-    const visibleCol = Math.floor(state.offsetX);
-    const visibleRow = Math.floor(state.offsetY);
+    const visibleCol = clamp(Math.floor(state.offsetX), 0, Math.max(0, state.cols - 1));
+    const visibleRow = clamp(Math.floor(state.offsetY), 0, Math.max(0, state.rows - 1));
     const sizeMb = (state.fileSizeBytes / (1024 * 1024)).toFixed(1);
-    const lodLabel = state.lastLodMode === "bitmap" ? "Overview scan" : "Detail scan";
+    const lodLabel = state.lastLodMode === "bitmap" ? "Overview scan" :
+      (state.lastLodMode === "transition" ? "Resolving text" : "Detail scan");
     infoPanel.innerHTML =
       `<span class="name">${escapeHtml(state.fileName)}</span>` +
       `Grid <span class="num">${state.cols.toLocaleString()} &times; ${state.rows.toLocaleString()}</span> chars<br>` +
@@ -990,8 +1031,17 @@
     const fitCell = clamp(Math.min(fitWidthCell, fitHeightCell), MIN_CELL_SIZE, MAX_CELL_SIZE);
 
     setCellWidth(fitCell);
-    state.offsetX = 0;
-    state.offsetY = 0;
+
+    // Center the fitted map in the viewport.  The old version pinned offset
+    // to 0,0, which is why a fully fitted map hugged the left side whenever
+    // the viewport was wider than the map's aspect ratio.
+    const cellHeight = state.cellWidth * state.aspectRatio;
+    const viewCols = cssW / state.cellWidth;
+    const viewRows = cssH / cellHeight;
+    state.offsetX = (state.cols - viewCols) / 2;
+    state.offsetY = (state.rows - viewRows) / 2;
+
+    clampOffsets();
     syncZoomSliderFromCellWidth();
     markDirty();
   }
@@ -1028,12 +1078,22 @@
     const viewCols = cssW / state.cellWidth;
     const viewRows = cssH / cellHeight;
 
-    const maxX = Math.max(0, state.cols - viewCols * 0.15);
-    const maxY = Math.max(0, state.rows - viewRows * 0.15);
-    const minX = -viewCols * 0.15;
-    const minY = -viewRows * 0.15;
-    state.offsetX = clamp(state.offsetX, minX, maxX);
-    state.offsetY = clamp(state.offsetY, minY, maxY);
+    // If the viewport is larger than the map on an axis, lock that axis to
+    // the true centered offset.  If the user is zoomed in, keep a small
+    // overscroll margin so panning still feels natural at the edges.
+    if (viewCols >= state.cols) {
+      state.offsetX = (state.cols - viewCols) / 2;
+    } else {
+      const marginX = viewCols * 0.15;
+      state.offsetX = clamp(state.offsetX, -marginX, state.cols - viewCols + marginX);
+    }
+
+    if (viewRows >= state.rows) {
+      state.offsetY = (state.rows - viewRows) / 2;
+    } else {
+      const marginY = viewRows * 0.15;
+      state.offsetY = clamp(state.offsetY, -marginY, state.rows - viewRows + marginY);
+    }
   }
 
   function cellWidthFromSlider(sliderValue) {
@@ -1185,8 +1245,8 @@
     markDirty();
   });
 
-  window.addEventListener("resize", () => markDirty());
-  if (window.ResizeObserver) new ResizeObserver(() => markDirty()).observe(canvas.parentElement);
+  window.addEventListener("resize", () => { clampOffsets(); markDirty(); });
+  if (window.ResizeObserver) new ResizeObserver(() => { clampOffsets(); markDirty(); }).observe(canvas.parentElement);
 
   resizeCanvasToDisplaySize();
   markDirty();
