@@ -23,3 +23,6 @@ should render a bit laggy but fine
 
 ## Alternative
 Grab finished fully built `BOTW-ASCII.txt` from /finished file/BOTW-ASCII.txt directly and download it to load it into the renderer.
+
+## Side Note
+Since its the holidays rn, this took like one afternoon and a cup of tea, pretty neat! 
