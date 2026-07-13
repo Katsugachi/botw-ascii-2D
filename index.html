@@ -560,13 +560,16 @@
   const RELIEF_HEIGHT_POWER = 1.15;
   const RELIEF_SHADOW_ALPHA = 0.24;
 
-  // Important: the source overview contains bright, thin roads.  Those should
-  // stay painted on the map, but they should NOT become raised walls.  Build
-  // relief from a blurred low-frequency terrain field, while coloring from
-  // the original detail field.  This keeps mountains/hills raised and roads
-  // flat on the surface.
-  const RELIEF_TERRAIN_BLUR_RADIUS = 12;
-  const RELIEF_TERRAIN_BLUR_PASSES = 2;
+  // Important: the source overview contains bright, thin roads. Those should
+  // stay painted on the map, but they should NOT become raised walls. Keep the
+  // original high-detail heightfield, then only flatten pixels that look like
+  // narrow bright roads/paths against their surrounding terrain.
+  const RELIEF_ROAD_BG_RADIUS = 10;
+  const RELIEF_ROAD_LOCAL_RADIUS = 2;
+  const RELIEF_ROAD_MIN_DENSITY = 0.38;
+  const RELIEF_ROAD_CONTRAST = 0.105;
+  const RELIEF_ROAD_THINNESS = 0.075;
+  const RELIEF_ROAD_HEIGHT_PAD = 0.015;
 
   const OVERVIEW_RES = 1536;     // resolution (both axes) of the LOD bitmap
   const MINIMAP_DISPLAY_SIZE = 168;
@@ -924,21 +927,39 @@
     return { r: +m[1], g: +m[2], b: +m[3] };
   }
 
-  function buildReliefTerrainHeightBuffer(source, width, height) {
-    let current = source;
-    const scratchA = new Float32Array(width * height);
-    const scratchB = new Float32Array(width * height);
+  function buildRoadSuppressedHeightBuffer(source, width, height) {
+    // Two cheap box blurs give us context without destroying the actual relief:
+    // - broad background = where the surrounding terrain surface probably is
+    // - tiny local mean = whether a bright pixel is a broad bright region or a
+    //   skinny line sitting on darker terrain.
+    const broadBg = new Float32Array(width * height);
+    const localMean = new Float32Array(width * height);
+    boxBlur(source, broadBg, width, height, RELIEF_ROAD_BG_RADIUS);
+    boxBlur(source, localMean, width, height, RELIEF_ROAD_LOCAL_RADIUS);
 
-    for (let pass = 0; pass < RELIEF_TERRAIN_BLUR_PASSES; pass++) {
-      // Safe buffer reuse: horizontal reads `current` and writes scratchA;
-      // vertical then reads scratchA and writes scratchB. On the next pass,
-      // horizontal reads scratchB and overwrites scratchA again.
-      boxBlurHorizontal(current, scratchA, width, height, RELIEF_TERRAIN_BLUR_RADIUS);
-      boxBlurVertical(scratchA, scratchB, width, height, RELIEF_TERRAIN_BLUR_RADIUS);
-      current = scratchB;
+    const out = new Float32Array(width * height);
+    for (let i = 0; i < source.length; i++) {
+      const d = source[i];
+      const bg = broadBg[i];
+      const local = localMean[i];
+
+      // Road-like = bright enough, noticeably brighter than nearby terrain,
+      // but not part of a broad bright mass. This catches thin pale road lines
+      // while leaving snowy mountains / light plateaus raised like before.
+      const isNarrowBrightLine =
+        d >= RELIEF_ROAD_MIN_DENSITY &&
+        d - bg >= RELIEF_ROAD_CONTRAST &&
+        d - local >= RELIEF_ROAD_THINNESS;
+
+      out[i] = isNarrowBrightLine ? Math.min(d, bg + RELIEF_ROAD_HEIGHT_PAD) : d;
     }
+    return out;
+  }
 
-    return current;
+  function boxBlur(src, dst, width, height, radius) {
+    const tmp = new Float32Array(width * height);
+    boxBlurHorizontal(src, tmp, width, height, radius);
+    boxBlurVertical(tmp, dst, width, height, radius);
   }
 
   function boxBlurHorizontal(src, dst, width, height, radius) {
@@ -987,7 +1008,7 @@
     const out = imgData.data;
     const bg = hexToRgb(COLOR_MODES[state.colorMode].bg);
     const density = state.densityBuffer;
-    const terrainHeight = buildReliefTerrainHeightBuffer(density, OVERVIEW_RES, OVERVIEW_RES);
+    const terrainHeight = buildRoadSuppressedHeightBuffer(density, OVERVIEW_RES, OVERVIEW_RES);
 
     // Pre-cache 256 possible colors so we do not parse rgb() strings for
     // every single pixel while building the heightfield.
@@ -1027,7 +1048,7 @@
       for (let x = 0; x < OVERVIEW_RES; x++) {
         const idx = y * OVERVIEW_RES + x;
         const d = density[idx];                  // original map detail/color
-        const terrain = terrainHeight[idx];      // smoothed elevation only
+        const terrain = terrainHeight[idx];      // original elevation, roads flattened
         const h = Math.pow(terrain, RELIEF_HEIGHT_POWER);
         const lift = Math.round(h * RELIEF_HEIGHT_PX);
         const side = Math.round(h * RELIEF_SIDE_SHIFT_PX);
@@ -1036,9 +1057,9 @@
 
         const base = colorCache[Math.max(0, Math.min(255, Math.round(d * 255)))];
 
-        // Slope lighting from upper-left, computed from the smoothed terrain
-        // height instead of raw brightness.  This prevents roads/rivers/textured
-        // outlines from casting cliff-like shadows.
+        // Slope lighting from upper-left, computed from the road-suppressed
+        // height instead of raw brightness. This prevents roads from casting
+        // cliff-like shadows while keeping the original detailed relief.
         const gradX = sampleHeight(x + 1, y) - sampleHeight(x - 1, y);
         const gradY = sampleHeight(x, y + 1) - sampleHeight(x, y - 1);
         const shade = clamp(0.88 + (-gradX * 0.55 - gradY * 0.85) * RELIEF_SLOPE_STRENGTH + h * 0.18, 0.42, 1.45);
