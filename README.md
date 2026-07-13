@@ -1,5 +1,5 @@
 # Legend Of Zelda: Breath Of The Wild ASCII
-2D Top Down FULL ASCII of BOTW with HTML renderer and overview for performance boost.  <br>
+2D Top Down FULL ASCII of BOTW with HTML renderer and PNG overview for performance boost.  <br>
 HOWEVER, heightfield is toggleable in settings, so 2.25D? <br>
 I can't do much more than this, so expand on it and make it better if you want. <br><br>
 Web Demo Live: https://katsugachi.github.io/botw-ascii-2D/
