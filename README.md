@@ -18,3 +18,6 @@ confirm and run script to generate `BOTW-ASCII.txt`
 typical text programs (notepad, notepad++) will lag heavily trying to render 10mb+ of ASCII art. <br>
 Instead, use built in `Hyrule Atlas.html` and import `BOTW-ASCII.txt` <br>
 should render a bit laggy but fine
+
+## Alternative
+Grab finished fully built `BOTW-ASCII.txt` from /finished file/BOTW-ASCII.txt directly and download it to load it into the renderer.
