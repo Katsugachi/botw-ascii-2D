@@ -1,5 +1,6 @@
 # botw-ascii-2D
-2D Top Down ASCII of BOTW. significantly easier to do than 2.5D.
+2D Top Down ASCII of BOTW. significantly easier to do than 2.5D. <br>
+HOWEVER, heightfield is toggleable in settings, so 2.25D?
 ## Instructions
 1. Clone & Navigate <br>
 `git clone https://github.com/Katsugachi/botw-ascii-2D/tree/main` <br>
