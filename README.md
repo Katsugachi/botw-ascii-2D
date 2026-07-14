@@ -2,7 +2,18 @@
 2D Top Down FULL ASCII of BOTW with HTML renderer and PNG overview for performance boost.  <br>
 HOWEVER, heightfield is toggleable in settings, so 2.25D? <br>
 I can't do much more than this, so expand on it and make it better if you want. <br><br>
-Web Demo Live: https://katsugachi.github.io/botw-ascii-2D/
+Web Demo Live: https://katsugachi.github.io/botw-ascii-2D/ <br>
+
+## Resolution Adjusting
+Web version has 89MB version built in, local version by default uses DEFAULT_TILE_RESOLUTION of 100 (total 10mb, very small). <br>
+You can adjust the resolution in the stitching python file under DEFAULT_TILE_RESOLUTION 
+| Setting   | Tile Resolution | Approx. Size |
+|-----------|------------------|--------------|
+| Small     | 100              | ~10MB        |
+| Medium    | 200              | ~45MB        |
+| Big       | 300              | ~90MB        |
+| Full Res  | 750              | ~560MB       |
+
 ## Instructions - Build From Scratch
 #### 1. Clone & Navigate <br>
 `git clone https://github.com/Katsugachi/botw-ascii-2D/tree/main` <br>
