@@ -12,7 +12,7 @@ You can adjust the resolution in the stitching python file under DEFAULT_TILE_RE
 | Small     | 100              | ~10MB        |
 | Medium    | 200              | ~45MB        |
 | Big       | 300              | ~90MB        |
-| Full Res  | 750              | ~560MB       |
+| Full Res  | 750              | ~549MB       |
 
 ## Instructions - Build From Scratch
 #### 1. Clone & Navigate <br>
