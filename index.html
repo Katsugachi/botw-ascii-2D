@@ -773,8 +773,8 @@
       })
       .then(({ text, contentLength }) => {
         loadingBarFill.style.width = "65%";
-        const sizeBytes = contentLength || new Blob([text]).size;
-        parseAsciiText(text, DEFAULT_MAP_URL, sizeBytes);
+        const sizeBytes = new Blob([text]).size;
+        parseAsciiText(text, "finished file/BOTW-ASCII.txt", sizeBytes);
       })
       .catch((err) => {
         loadingOverlay.classList.add("hidden");
