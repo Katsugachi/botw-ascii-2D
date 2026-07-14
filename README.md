@@ -9,9 +9,10 @@ Web version has 89MB version built in, local version by default uses DEFAULT_TIL
 You can adjust the resolution in the stitching python file under DEFAULT_TILE_RESOLUTION 
 | Setting   | Tile Resolution | Approx. Size |
 |-----------|------------------|--------------|
-| Small     | 100              | ~10MB        |
-| Medium    | 200              | ~45MB        |
-| Big       | 300              | ~90MB        |
+| Small     | 50               | ~2.5MB        |
+| Medium    | 100              | ~10MB (Recommended)       |
+| High      | 200              | ~45MB        |
+| Extra High| 300              | ~90MB (Default for Web Demo        |
 | Full Res  | 750              | ~549MB       |
 
 ## Instructions - Build From Scratch
